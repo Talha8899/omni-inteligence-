@@ -19,7 +19,7 @@ import {
   HeartOff
 } from 'lucide-react';
 import { INITIAL_QUESTIONS, Question } from './data/questions';
-import { generateNewQuestion } from './services/geminiService';
+import { generateQuestionBatch } from './services/geminiService';
 
 const COLORS = {
   bg: '#050505',
@@ -41,6 +41,13 @@ const RANKS = [
 const TOPICS = [
   'All', 'General Knowledge', 'Science & Tech', 'Pakistan Special', 'Brain Teasers & Logic', 'Current Affairs', 'Technology', 'Islamic History', 'History', 'Philosophy', 'Art & Culture', 'Nature & Space', 'Medicine', 'Literature', 'Economy'
 ];
+
+const isRateLimit = (err: any) => {
+  const msg = typeof err === 'string' ? err : (err?.message || err?.error?.message || JSON.stringify(err) || '');
+  const status = err?.status || err?.error?.status || '';
+  const code = err?.code || err?.error?.code;
+  return msg.includes('429') || msg.includes('quota') || msg.includes('Quota') || status === 429 || status === 'RESOURCE_EXHAUSTED' || code === 429;
+};
 
 export default function App() {
   const [questions, setQuestions] = useState<Question[]>(INITIAL_QUESTIONS);
@@ -91,18 +98,6 @@ export default function App() {
     }
   };
 
-  useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (gameState === 'playing' && timeLeft > 0) {
-      timer = setInterval(() => {
-        setTimeLeft(prev => prev - 1);
-      }, 1000);
-    } else if (timeLeft === 0 && gameState === 'playing') {
-      handleOptionSelect(-1); // -1 indicates a timeout
-    }
-    return () => clearInterval(timer);
-  }, [gameState, timeLeft]);
-
   const handleStart = (daily = false) => {
     setQuestionsAnswered(0);
     setIsDailyQuest(daily);
@@ -119,7 +114,14 @@ export default function App() {
     const now = Date.now();
     if (apiExhausted && now - lastApiErrorTime < 60000) {
       console.warn("API in cooldown, using fallback");
-      const fallback = INITIAL_QUESTIONS.sort(() => Math.random() - 0.5).slice(0, 3);
+      let fallbackChoices = INITIAL_QUESTIONS.filter(q => 
+        (difficultyFilter === 'All' || q.difficulty === difficultyFilter) &&
+        (topicFilter === 'All' || q.category === topicFilter)
+      );
+      if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS.filter(q => difficultyFilter === 'All' || q.difficulty === difficultyFilter);
+      if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS;
+      
+      const fallback = fallbackChoices.sort(() => Math.random() - 0.5).slice(0, 3);
       setQuestions(fallback);
       setTimeLeft(getTimerDuration(fallback[0].difficulty));
       setIsLoadingMore(false);
@@ -129,53 +131,33 @@ export default function App() {
     const targetTopic = daily ? 'Random Deep Wisdom' : topicFilter;
     const targetDifficulty = difficultyFilter === 'All' ? 'Medium' : difficultyFilter;
     
-    // Fetch first question immediately for speed with a timeout fallback
-    const fetchPromise = generateNewQuestion([], targetTopic, targetDifficulty);
-    const timeoutPromise = new Promise<null>((resolve) => setTimeout(() => resolve(null), 2500));
-
-    Promise.race([fetchPromise, timeoutPromise]).then(firstQ => {
-      if (firstQ) {
-        setApiExhausted(false);
-        const q1 = { ...firstQ, id: `init-${Date.now()}-0` };
-        setQuestions([q1]);
-        setTimeLeft(getTimerDuration(q1.difficulty));
-        setIsLoadingMore(false);
-
-        // Fetch two more in background if not exhausted
-        if (!apiExhausted) {
-          Promise.all([
-            generateNewQuestion([q1.question], targetTopic, targetDifficulty),
-            generateNewQuestion([q1.question], targetTopic, targetDifficulty),
-          ]).then(others => {
-            const newQs = others.map((q, idx) => ({ ...q, id: `init-${Date.now()}-${idx + 1}` }));
-            setQuestions(prev => [...prev, ...newQs]);
-          }).catch(err => {
-             console.error("Background initial fetch failed", err);
-             if (err?.message?.includes('429') || err?.status === 429) {
-               setApiExhausted(true);
-               setLastApiErrorTime(now);
-             }
-          });
+    // Fetch a batch of questions immediately.
+    generateQuestionBatch([], targetTopic, targetDifficulty, 30)
+      .then(initialQs => {
+        if (initialQs && initialQs.length > 0) {
+          setApiExhausted(false);
+          const uniqueQs = initialQs.map((q, idx) => ({ ...q, id: `init-${Date.now()}-${idx}` }));
+          setQuestions(uniqueQs);
+          setTimeLeft(getTimerDuration(uniqueQs[0].difficulty));
+          setIsLoadingMore(false);
+        } else {
+          // Fallback if empty response
+          throw new Error("Empty response");
         }
-      } else {
-        // Fallback if AI is too slow (reduced threshold)
-        console.warn("AI generation too slow, using fallback");
-        let fallbackChoices = INITIAL_QUESTIONS.filter(q => difficultyFilter === 'All' || q.difficulty === difficultyFilter);
-        if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS;
-        const q1 = fallbackChoices[Math.floor(Math.random() * fallbackChoices.length)];
-        setQuestions([q1]);
-        setTimeLeft(getTimerDuration(q1.difficulty));
-        setIsLoadingMore(false);
-      }
-    }).catch((err) => {
+      })
+      .catch((err) => {
         console.error("AI First Question Generation failed", err);
-        if (err?.message?.includes('429') || err?.status === 429) {
+        if (isRateLimit(err)) {
           setApiExhausted(true);
           setLastApiErrorTime(Date.now());
         }
-        let fallback = INITIAL_QUESTIONS.filter(q => difficultyFilter === 'All' || q.difficulty === difficultyFilter);
-        if (fallback.length === 0) fallback = INITIAL_QUESTIONS;
-        const finalFallback = fallback.slice(0, 3);
+        let fallbackChoices = INITIAL_QUESTIONS.filter(q => 
+          (difficultyFilter === 'All' || q.difficulty === difficultyFilter) &&
+          (topicFilter === 'All' || q.category === topicFilter)
+        );
+        if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS.filter(q => difficultyFilter === 'All' || q.difficulty === difficultyFilter);
+        if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS;
+        const finalFallback = fallbackChoices.sort(() => Math.random() - 0.5).slice(0, 30); // Use up to 30 fallback questions
         setQuestions(finalFallback);
         setTimeLeft(getTimerDuration(finalFallback[0].difficulty));
         setIsLoadingMore(false);
@@ -186,21 +168,22 @@ export default function App() {
     if (isPrefetching || apiExhausted) return;
     
     // Don't prefetch if we already have a healthy buffer
-    if (currentQuestions.length - currentIdx > 6) return;
+    if (currentQuestions.length - currentIdx > 15) return;
 
     setIsPrefetching(true);
     try {
-      const nextQ = await generateNewQuestion(
+      const nextQs = await generateQuestionBatch(
         currentQuestions.map(q => q.question), 
         isDailyQuest ? 'Deep Wisdom' : topicFilter,
-        difficultyFilter === 'All' ? 'Medium' : difficultyFilter
+        difficultyFilter === 'All' ? 'Medium' : difficultyFilter,
+        5
       );
       setApiExhausted(false);
-      const newQ = { ...nextQ, id: `prefetch-${Date.now()}` };
-      setQuestions(prev => [...prev, newQ]);
+      const newQs = nextQs.map((q, idx) => ({ ...q, id: `prefetch-${Date.now()}-${idx}` }));
+      setQuestions(prev => [...prev, ...newQs]);
     } catch (err: any) {
       console.error("Prefetch failed", err);
-      if (err?.message?.includes('429') || err?.status === 429) {
+      if (isRateLimit(err)) {
         setApiExhausted(true);
         setLastApiErrorTime(Date.now());
       }
@@ -228,13 +211,20 @@ export default function App() {
       setGameState('playing');
       
       // If we are running low on buffer, fetch more
-      if (questions.length - currentIdx < 4 && !apiExhausted) {
+      if (questions.length - currentIdx < 10 && !apiExhausted) {
         prefetchQuestion([...questions]);
       }
     } else {
       // Buffer empty, must wait
       if (apiExhausted) {
-        const fallback = INITIAL_QUESTIONS[Math.floor(Math.random() * INITIAL_QUESTIONS.length)];
+        let fallbackChoices = INITIAL_QUESTIONS.filter(q => 
+          (difficultyFilter === 'All' || q.difficulty === difficultyFilter) &&
+          (topicFilter === 'All' || q.category === topicFilter)
+        );
+        if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS.filter(q => difficultyFilter === 'All' || q.difficulty === difficultyFilter);
+        if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS;
+        const fallback = fallbackChoices[Math.floor(Math.random() * fallbackChoices.length)];
+        
         const newQ = { ...fallback, id: Date.now().toString() };
         setQuestions(prev => [...prev, newQ]);
         setCurrentIdx(i => i + 1);
@@ -246,23 +236,30 @@ export default function App() {
       
       setIsLoadingMore(true);
       try {
-        const nextQ = await generateNewQuestion(
+        const nextQs = await generateQuestionBatch(
           questions.map(q => q.question), 
           isDailyQuest ? 'Deep Wisdom' : topicFilter,
-          difficultyFilter === 'All' ? 'Medium' : difficultyFilter
+          difficultyFilter === 'All' ? 'Medium' : difficultyFilter,
+          5
         );
-        const newQ = { ...nextQ, id: Date.now().toString() };
-        setQuestions(prev => [...prev, newQ]);
+        const newQs = nextQs.map((q, idx) => ({ ...q, id: `next-${Date.now()}-${idx}` }));
+        setQuestions(prev => [...prev, ...newQs]);
         setCurrentIdx(i => i + 1);
         setSelectedOption(null);
-        setTimeLeft(getTimerDuration(newQ.difficulty));
+        setTimeLeft(getTimerDuration(newQs[0].difficulty));
         setGameState('playing');
       } catch (err: any) {
-        if (err?.message?.includes('429') || err?.status === 429) {
+        if (isRateLimit(err)) {
           setApiExhausted(true);
           setLastApiErrorTime(Date.now());
           // Switch to fallback instead of finishing game
-          const fallback = INITIAL_QUESTIONS[Math.floor(Math.random() * INITIAL_QUESTIONS.length)];
+          let fallbackChoices = INITIAL_QUESTIONS.filter(q => 
+            (difficultyFilter === 'All' || q.difficulty === difficultyFilter) &&
+            (topicFilter === 'All' || q.category === topicFilter)
+          );
+          if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS.filter(q => difficultyFilter === 'All' || q.difficulty === difficultyFilter);
+          if (fallbackChoices.length === 0) fallbackChoices = INITIAL_QUESTIONS;
+          const fallback = fallbackChoices[Math.floor(Math.random() * fallbackChoices.length)];
           const newQ = { ...fallback, id: Date.now().toString() };
           setQuestions(prev => [...prev, newQ]);
           setCurrentIdx(i => i + 1);
@@ -278,8 +275,8 @@ export default function App() {
     }
   }, [currentIdx, questions, topicFilter, isDailyQuest, prefetchQuestion, difficultyFilter]);
 
-  const handleOptionSelect = (idx: number) => {
-    if (gameState !== 'playing') return;
+  const handleOptionSelect = useCallback((idx: number) => {
+    if (gameState !== 'playing' || !currentQuestion) return;
     setSelectedOption(idx);
     setGameState('feedback');
 
@@ -306,7 +303,19 @@ export default function App() {
       });
       // Don't auto-advance on wrong answer so they can read explanation
     }
-  };
+  }, [gameState, currentQuestion, prefetchQuestion, questions, handleNext]);
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (gameState === 'playing' && timeLeft > 0 && currentQuestion) {
+      timer = setInterval(() => {
+        setTimeLeft(prev => prev - 1);
+      }, 1000);
+    } else if (timeLeft === 0 && gameState === 'playing' && currentQuestion) {
+      handleOptionSelect(-1); // -1 indicates a timeout
+    }
+    return () => clearInterval(timer);
+  }, [gameState, timeLeft, currentQuestion, handleOptionSelect]);
 
   const resetGame = () => {
     setQuestions(INITIAL_QUESTIONS);
