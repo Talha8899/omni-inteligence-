@@ -39,21 +39,6 @@ Omnia relies on the **Gemini 3 Flash Preview** (`gemini-3-flash-preview`) model 
 *   **AI / Backend Integration**: `@google/genai` TypeScript SDK using `process.env.GEMINI_API_KEY`.
 *   **Icons**: Lucide React
 
-## 🚀 Running Locally
-
-1. Install dependencies:
-   ```bash
-   npm install
-   ```
-2. Create a `.env` file in the root directory and add your Gemini API Key:
-   ```env
-   GEMINI_API_KEY=your_api_key_here
-   ```
-3. Start the development server:
-   ```bash
-   npm run dev
-   ```
-4. Access the game at `http://localhost:3000`.
 
 ---
 *Created as part of an interactive AI Studio knowledge experience.*
